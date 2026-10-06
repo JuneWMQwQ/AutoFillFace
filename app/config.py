@@ -25,10 +25,10 @@ DEFAULTS = {
     "api_key": "",
     "model": "glm-4.6v-flash",
     "vision_endpoint": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-    "picui_token": "702|gBx0fwtyD0ugUmTdRXT0SVz3xU9sd7jFopkZPYXl87ba77f8",  # PICUI 图床主 token（可选）
+    "picui_token": "",  # PICUI 图床主 token（可选，请在界面设置页填写，勿提交到仓库）
     "picui_base": "https://v2.picui.cn",
     "hotkey": "<ctrl>+<alt>+m",   # 全局热键
-    "face_threshold": 0.55,       # ArcFace 余弦相似度阈值
+    "face_threshold": 0.45,       # ArcFace 余弦相似度阈值
     "camera_index": 0,            # 摄像头索引
     "vision_enabled": True,       # 是否启用视觉模型识别（关闭则只做人脸+填充）
     "fill_delay": 0.35,           # 点击字段后的等待秒数
