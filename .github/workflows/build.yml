@@ -22,28 +22,27 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install opencv-python==4.11.0.86 numpy Pillow mss pynput requests pyinstaller customtkinter
+          pip install -r requirements.txt
 
       - name: Build EXE
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean --onefile --noconsole `
-            --name AutoFillFace `
-            --icon AutoFillFace.ico `
-            --add-data "assets/models;assets/models" `
-            --add-data "faceid;faceid" `
-            --collect-data customtkinter `
-            app/main.py
+          python -m PyInstaller --noconfirm --clean AutoFillFace.spec
+
+      - name: Zip bundle
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/AutoFillFace -DestinationPath dist/AutoFillFace.zip -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: AutoFillFace-windows
-          path: dist/AutoFillFace.exe
+          path: dist/AutoFillFace.zip
 
       - name: Release on tag
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/AutoFillFace.exe
+          files: dist/AutoFillFace.zip
           name: ${{ github.ref_name }}

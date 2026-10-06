@@ -1,1 +1,17 @@
-﻿backups/
+# 备份目录
+backups/
+
+# 运行时数据（含 API Key / 图床 Token / 密码库 / 人脸模板，绝不能推）
+settings.json
+vault.bin
+face.bin
+*.bin
+selftest_report.txt
+
+# 构建产物
+build/
+dist/
+__pycache__/
+*.pyc
+*.pyo
+*.spec.bak
