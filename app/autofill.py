@@ -9,6 +9,7 @@ import time
 
 from pynput import keyboard, mouse
 
+import captcha_ocr
 import screen
 
 
@@ -119,11 +120,11 @@ def run_autofill(config, vault, face_engine, matcher_best,
                 return FillResult(False, "face", "无法打开摄像头，请检查设备与权限")
             _notify("face", "正在采集人脸帧（约1秒）…")
             frames = []
-            for i in range(5):
+            for i in range(8):
                 ok, frame = cap.read()
                 if ok and frame is not None:
                     frames.append(frame)
-                time.sleep(0.15)
+                time.sleep(0.12)
             cap.release()
             _notify("face", f"采集到 {len(frames)} 帧，正在比对…")
             if not frames:
@@ -165,6 +166,26 @@ def run_autofill(config, vault, face_engine, matcher_best,
     try:
         user_c = entry.get("user_coord") or []
         pwd_c = entry.get("pwd_coord") or []
+        captcha = entry.get("captcha") or {}
+        cap_region = captcha.get("region") or {}
+        cap_coord = captcha.get("coord") or []
+        cap_enabled = bool(captcha and cap_region and cap_coord)
+        cap_order = captcha.get("order", "after_pwd")
+        cap_before = cap_enabled and cap_order == "before_pwd"
+        cap_after = cap_enabled and cap_order == "after_pwd"
+
+        def _fill_captcha():
+            _notify("captcha", "正在截取验证码区域并识别…")
+            code = captcha_ocr.recognize_region(cap_region, monitor)
+            if not code:
+                raise RuntimeError("验证码识别为空：区域坐标可能不准或图片不清晰，请重新配置该服务")
+            _notify("captcha", f"识别到验证码「{code}」，正在输入…")
+            captcha_ocr.copy_to_clipboard(code)
+            _click(cap_coord[0] * monitor["width"] + monitor["left"],
+                   cap_coord[1] * monitor["height"] + monitor["top"], delay)
+            _type_text(code)
+            time.sleep(0.2)
+
         # 用户名：点坐标 → 填用户名
         if user_c and entry.get("username"):
             _notify("fill", "正在填写用户名…")
@@ -172,6 +193,9 @@ def run_autofill(config, vault, face_engine, matcher_best,
                    user_c[1] * monitor["height"] + monitor["top"], delay)
             _type_text(entry["username"])
             time.sleep(0.2)
+        # 验证码（顺序：密码之前）
+        if cap_before:
+            _fill_captcha()
         # 密码：点坐标 → 填密码
         if pwd_c:
             _notify("fill", "正在填写密码…")
@@ -182,6 +206,9 @@ def run_autofill(config, vault, face_engine, matcher_best,
             _notify("fill", "该服务未标注密码坐标，将填入当前聚焦输入框（请确认光标在密码框内）…")
             time.sleep(1.2)
             _type_text(entry["password"])
+        # 验证码（顺序：密码之后）
+        if cap_after:
+            _fill_captcha()
         # 宏
         if entry.get("macro"):
             _notify("fill", "正在执行自定义宏…")
