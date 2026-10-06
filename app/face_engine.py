@@ -56,7 +56,7 @@ def _align_face(img: np.ndarray, landmarks: np.ndarray, size: int = 112) -> np.n
 
 class SCRFD:
     def __init__(self, model_path: str, input_size=(640, 640),
-                 conf_thres: float = 0.5, iou_thres: float = 0.4):
+                 conf_thres: float = 0.3, iou_thres: float = 0.4):
         self.input_size = input_size
         self.conf_thres = conf_thres
         self.iou_thres = iou_thres
