@@ -77,6 +77,7 @@ class Vault:
             e.setdefault("user_coord", [])
             e.setdefault("pwd_coord", [])
             e.setdefault("macro", "")
+            e.setdefault("captcha", None)  # 验证码配置：None 或 {region, coord, order}
 
     def save(self) -> None:
         data = {"version": 1, "entries": self.entries}
@@ -88,7 +89,7 @@ class Vault:
     def add(self, service: str, url: str, username: str, password: str, note: str = "",
             snapshots: list | None = None,
             user_coord: tuple | None = None, pwd_coord: tuple | None = None,
-            macro: str = "") -> dict:
+            macro: str = "", captcha: dict | None = None) -> dict:
         now = time.strftime("%Y-%m-%d %H:%M:%S")
         entry = {
             "id": uuid.uuid4().hex[:12],
@@ -101,6 +102,7 @@ class Vault:
             "user_coord": list(user_coord) if user_coord else [],   # [x, y] 比例坐标
             "pwd_coord": list(pwd_coord) if pwd_coord else [],      # [x, y] 比例坐标
             "macro": macro,                # 自定义宏（文本命令）
+            "captcha": captcha,            # 验证码配置：{region:{left,top,width,height}, coord:[x,y], order:"before_pwd"|"after_pwd"}
             "created": now,
             "updated": now,
         }
@@ -112,7 +114,7 @@ class Vault:
         for e in self.entries:
             if e["id"] == entry_id:
                 for k in ("service", "url", "username", "password", "note",
-                          "snapshots", "user_coord", "pwd_coord", "macro"):
+                          "snapshots", "user_coord", "pwd_coord", "macro", "captcha"):
                     if k in fields:
                         e[k] = fields[k]
                 e["updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
