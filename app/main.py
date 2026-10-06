@@ -70,6 +70,18 @@ def selftest() -> int:
         ok = False
 
     try:
+        import captcha_ocr
+        eng = captcha_ocr._get_engine()
+        if eng is not None:
+            out("[ok] 验证码引擎: Windows 系统 OCR 加载成功（可识别验证码）")
+        else:
+            out("[fail] 验证码引擎: Windows 系统 OCR 不可用（系统缺少 OCR 语言包）")
+            ok = False
+    except Exception as e:
+        out(f"[fail] 验证码引擎: {e}")
+        ok = False
+
+    try:
         screen.set_dpi_awareness()
         bgr, mon = screen.capture_bgr(max_width=640)
         out(f"[ok] 截屏: {mon['width']}x{mon['height']} -> {bgr.shape[1]}x{bgr.shape[0]}")
