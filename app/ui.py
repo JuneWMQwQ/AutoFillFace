@@ -36,6 +36,7 @@ class FaceScanOverlay:
         self.photo = None
         self.frames = []   # faceid 帧 PhotoImage 列表
         self._frames_loaded = False
+        self._faceid_playing = False
 
     def _resource_dir(self):
         import sys
@@ -47,7 +48,7 @@ class FaceScanOverlay:
         import glob
         import numpy as np
         d = os.path.join(self._resource_dir(), "faceid")
-        files = sorted(glob.glob(os.path.join(d, "FaceID*.png")))[::2]   # 抽一半帧减少卡顿
+        files = sorted(glob.glob(os.path.join(d, "FaceID*.png")))
         try:
             self.app._log(f"查找 faceid 帧：{d}，找到 {len(files)} 个")
         except Exception:
@@ -119,21 +120,25 @@ class FaceScanOverlay:
     def _tick(self):
         if self.finished or self.tl is None or not self.tl.winfo_exists():
             return
-        el = (time.time() - self.t0) / 0.9   # 变形总时长 0.9s
+        el = (time.time() - self.t0) / 0.80
         if el >= 1:
-            # 变形结束，停在圆角方块（等识别结果）
-            self._render_shape(180, 180, 24)
+            self._render_shape(180, 150, 24)
+            # 变形结束，立刻开始播 faceid 绿色扫描（边识别边播）
+            if not self._faceid_playing:
+                self._faceid_playing = True
+                self._play_sound()
+                self._play_frames()
             return
-        if el < 0.45:
-            p = self._ease(el / 0.45)
-            w = 100 + (220 - 100) * p
-            h = 100
-            cr = 50
+        if el < 0.40:
+            p = self._ease(el / 0.40)
+            w = 60 + (180 - 60) * p
+            h = 60
+            cr = 30
         else:
-            p = self._ease((el - 0.45) / 0.55)
-            w = 220
-            h = 100 + (220 - 100) * p
-            cr = 50 - (50 - 30) * p
+            p = self._ease((el - 0.40) / 0.60)
+            w = 180
+            h = 60 + (150 - 60) * p
+            cr = 30 - (30 - 24) * p
         self._render_shape(w, h, cr)
         self.tl.after(16, self._tick)
 
@@ -152,49 +157,70 @@ class FaceScanOverlay:
             pass
 
     def on_success(self):
-        """人脸验证通过：播 faceid 帧动画+音效，然后变绿勾。"""
+        """人脸验证通过：等 faceid 帧播完后画绿勾（不缩小）。"""
         def _do():
             if self.tl is None:
                 return
-            self._play_sound()
-            self._play_frames()
-            self.tl.after(20 * 50, self._show_check)
+            # faceid 已经在变形结束后开始播了，等它播完画勾
+            delay = max(0, len(self.frames) * 50 - int((time.time() - self.t0) * 1000) - 800)
+            self.tl.after(max(0, delay), self._show_check)
         self.app.after(0, _do)
 
     def _show_check(self):
         if self.finished or self.tl is None:
             return
         self.finished = True
-        from PIL import Image, ImageDraw
-        img = Image.new("RGBA", (self.W, self.H), (15, 15, 15, 255))
-        d = ImageDraw.Draw(img)
-        d.rounded_rectangle([10, 10, 190, 190], radius=24, fill=(0, 0, 0, 255))
-        cx, cy = self.W//2, self.H//2
-        d.line([(cx-28, cy+2), (cx-8, cy+22), (cx+30, cy-18)],
-               fill=(80, 230, 120, 255), width=8, joint="curve")
-        self.photo = ImageTk.PhotoImage(img)
-        self.canvas.delete("all")
-        self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
+        # faceid 最后两帧是空帧，直接在上面画勾
+        cx, cy = self.W // 2, self.H // 2
+        self._anim_polyline([(cx-28, cy+2), (cx-8, cy+22), (cx+30, cy-18)],
+                            "#50e678", width=8)
         self.tl.after(900, self._close)
 
     def on_fail(self):
-        """人脸验证失败：直接画红叉。"""
+        """人脸验证失败：直接在空帧上画红叉。"""
         def _do():
             self.finished = True
             if self.tl is None:
                 return
-            self.canvas.delete("all")
-            from PIL import Image, ImageDraw
-            img = Image.new("RGBA", (self.W, self.H), (15, 15, 15, 255))
-            d = ImageDraw.Draw(img)
-            d.rounded_rectangle([10, 10, 190, 190], radius=24, fill=(0, 0, 0, 255))
-            cx, cy = self.W//2, self.H//2
-            d.line([(cx-22, cy-22), (cx+22, cy+22)], fill=(255, 90, 90, 255), width=8)
-            d.line([(cx+22, cy-22), (cx-22, cy+22)], fill=(255, 90, 90, 255), width=8)
-            self.photo = ImageTk.PhotoImage(img)
-            self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
+            # 直接跳到最后一帧（空帧），画红叉
+            if hasattr(self, "_img_item") and self._img_item is not None and self.frames:
+                self.canvas.itemconfig(self._img_item, image=self.frames[-1])
+            cx, cy = self.W // 2, self.H // 2
+            self._anim_line((cx-22, cy-22), (cx+22, cy+22), "#ff5a5a", width=8)
+            self._anim_line((cx+22, cy-22), (cx-22, cy+22), "#ff5a5a", width=8)
             self.tl.after(900, self._close)
         self.app.after(0, _do)
+
+    def _anim_line(self, p0, p1, color, width=8, steps=6):
+        """从 p0 逐步画到 p1。"""
+        item = self.canvas.create_line(p0[0], p0[1], p0[0], p0[1],
+                                       fill=color, width=width, tags="shape")
+        for i in range(1, steps + 1):
+            t = i / steps
+            ex = p0[0] + (p1[0] - p0[0]) * t
+            ey = p0[1] + (p1[1] - p0[1]) * t
+            self.tl.after(i * 22, lambda ex=ex, ey=ey:
+                          self.canvas.coords(item, p0[0], p0[1], ex, ey))
+
+    def _anim_polyline(self, points, color, width=8, steps=6):
+        """逐段画折线（绿勾用）。"""
+        item = self.canvas.create_line(points[0][0], points[0][1], points[0][0], points[0][1],
+                                       fill=color, width=width, smooth=True, tags="shape")
+        delay = 0
+        for seg in range(len(points) - 1):
+            p0 = points[seg]
+            p1 = points[seg + 1]
+            for i in range(1, steps + 1):
+                t = i / steps
+                ex = p0[0] + (p1[0] - p0[0]) * t
+                ey = p0[1] + (p1[1] - p0[1]) * t
+                coords = [points[0][0], points[0][1]]
+                for s in range(1, seg + 1):
+                    coords += [points[s][0], points[s][1]]
+                coords += [ex, ey]
+                delay += 22
+                self.tl.after(delay, lambda c=coords:
+                              self.canvas.coords(item, *c))
 
     def _play_frames(self):
         """30fps 播放 faceid 帧序列（圆角遮罩已加好，保持窗口透明）。"""
@@ -221,36 +247,39 @@ class FaceScanOverlay:
             self.fi_idx = len(self.frames) - 1
 
     def _render_shape(self, w, h, cr):
-        from PIL import Image, ImageDraw
-        img = Image.new("RGBA", (self.W, self.H), (15, 15, 15, 255))
-        d = ImageDraw.Draw(img)
-        x0 = self.W/2 - w/2
-        y0 = self.H/2 - h/2
-        d.rounded_rectangle([x0, y0, x0+w, y0+h], radius=cr, fill=(0, 0, 0, 255))
-        self.photo = ImageTk.PhotoImage(img)
-        self.canvas.delete("all")
-        self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
+        self.canvas.delete("shape")
+        cx = self.W / 2
+        x0 = cx - w / 2
+        y0 = 20
+        x1 = x0 + w
+        y1 = y0 + h
+        cr = min(cr, w / 2, h / 2)
+        self.canvas.create_rectangle(x0+cr, y0, x1-cr, y1, fill="#000", outline="", tags="shape")
+        self.canvas.create_rectangle(x0, y0+cr, x0+cr, y1-cr, fill="#000", outline="", tags="shape")
+        self.canvas.create_rectangle(x1-cr, y0+cr, x1, y1-cr, fill="#000", outline="", tags="shape")
+        self.canvas.create_oval(x0, y0, x0+2*cr, y0+2*cr, fill="#000", outline="", tags="shape")
+        self.canvas.create_oval(x1-2*cr, y0, x1, y0+2*cr, fill="#000", outline="", tags="shape")
+        self.canvas.create_oval(x0, y1-2*cr, x0+2*cr, y1, fill="#000", outline="", tags="shape")
+        self.canvas.create_oval(x1-2*cr, y1-2*cr, x1, y1, fill="#000", outline="", tags="shape")
 
     def end(self, ok: bool):
         def _do():
             self.finished = True
             if self.tl is None:
                 return
-            self.canvas.delete("all")   # 清掉帧，绿色圆脸消失
-            # 画圆角黑方块
-            from PIL import Image, ImageDraw
-            img = Image.new("RGBA", (self.W, self.H), (15, 15, 15, 255))
-            d = ImageDraw.Draw(img)
-            d.rounded_rectangle([20, 20, 240, 240], radius=30, fill=(0, 0, 0, 255))
-            cx, cy = self.W//2, self.H//2
+            self.canvas.delete("all")
+            cx, cy = self.W // 2, 95
+            self.canvas.create_rectangle(30, 20, 170, 170, fill="#000", outline="", tags="shape")
+            self.canvas.create_oval(30, 20, 78, 68, fill="#000", outline="", tags="shape")
+            self.canvas.create_oval(122, 20, 170, 68, fill="#000", outline="", tags="shape")
+            self.canvas.create_oval(30, 122, 78, 170, fill="#000", outline="", tags="shape")
+            self.canvas.create_oval(122, 122, 170, 170, fill="#000", outline="", tags="shape")
             if ok:
-                d.line([(cx-28, cy+2), (cx-8, cy+22), (cx+30, cy-18)],
-                       fill=(80, 230, 120, 255), width=8, joint="curve")
+                self._anim_polyline([(cx-28, cy+2), (cx-8, cy+22), (cx+30, cy-18)],
+                                    "#50e678", width=8)
             else:
-                d.line([(cx-22, cy-22), (cx+22, cy+22)], fill=(255, 90, 90, 255), width=8)
-                d.line([(cx+22, cy-22), (cx-22, cy+22)], fill=(255, 90, 90, 255), width=8)
-            self.photo = ImageTk.PhotoImage(img)
-            self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
+                self._anim_line((cx-22, cy-22), (cx+22, cy+22), "#ff5a5a", width=8)
+                self._anim_line((cx+22, cy-22), (cx-22, cy+22), "#ff5a5a", width=8)
             self.tl.after(1000, self._close)
         self.app.after(0, _do)
 
@@ -260,495 +289,3 @@ class FaceScanOverlay:
         except Exception:
             pass
         self.tl = None
-
-
-class AddServiceWizard(ctk.CTkToplevel):
-    """新增服务向导：截屏预览 → 点击用户名框 → 点击密码框 → 填表单 → 保存。"""
-
-    def __init__(self, master, vault):
-        super().__init__(master)
-        self.title("新增服务（点击标坐标）")
-        self.transient(master)
-        self.grab_set()
-        self.configure(fg_color=BG)
-        self.vault = vault
-        self.saved = False
-        self.user_pt = None
-        self.pwd_pt = None
-        self.step = "user"
-        self.raw_bgr, self.monitor = screen.capture_bgr(max_width=1400)
-        self.scale = 700 / self.raw_bgr.shape[1]
-        self.preview = self.raw_bgr[:, :, ::-1].copy()
-        self.preview = cv2.resize(self.preview, None, fx=self.scale, fy=self.scale,
-                                  interpolation=cv2.INTER_AREA)
-        self.photo = ImageTk.PhotoImage(Image.fromarray(self.preview))
-        self.snap_bgrs = [self.raw_bgr]
-        self._build()
-
-    def _build(self):
-        top = ctk.CTkFrame(self, fg_color="transparent")
-        top.pack(fill="x", padx=12, pady=(10, 4))
-        self.hint = tk.StringVar(value="第 1 步：请在下方预览图中点击【用户名输入框】位置")
-        ctk.CTkLabel(top, textvariable=self.hint, text_color="#ff6b6b",
-                     font=ctk.CTkFont(size=13, weight="bold")).pack(anchor="w")
-
-        self.canvas = tk.Canvas(self, width=700, height=int(700 * self.raw_bgr.shape[0] / self.raw_bgr.shape[1]),
-                                bg="#202020", highlightthickness=0)
-        self.canvas.pack(padx=12)
-        self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
-        self.canvas.bind("<Button-1>", self._on_click)
-
-        form = ctk.CTkFrame(self)
-        form.pack(fill="x", padx=12, pady=8)
-        self.vars = {}
-        fields = [("service", "服务名 *"), ("url", "网址"),
-                  ("username", "用户名"), ("password", "密码"), ("note", "备注")]
-        for i, (key, label) in enumerate(fields):
-            ctk.CTkLabel(form, text=label, width=90, anchor="w").grid(row=i, column=0, padx=10, pady=5, sticky="w")
-            v = tk.StringVar()
-            self.vars[key] = v
-            show = "*" if key == "password" else ""
-            ctk.CTkEntry(form, textvariable=v, width=340, show=show).grid(row=i, column=1, padx=10, pady=5)
-        ctk.CTkLabel(form, text="自定义宏", width=90, anchor="nw").grid(row=5, column=0, padx=10, pady=5, sticky="nw")
-        self.macro_txt = ctk.CTkTextbox(form, width=340, height=60)
-        self.macro_txt.grid(row=5, column=1, padx=10, pady=5)
-        ctk.CTkLabel(form, text="宏每行：click x,y / type 文本 / key ENTER / sleep 秒",
-                     text_color="#888", font=ctk.CTkFont(size=11)).grid(
-            row=6, column=1, sticky="w", padx=10)
-
-        btns = ctk.CTkFrame(self, fg_color="transparent")
-        btns.pack(pady=10)
-        ctk.CTkButton(btns, text="📷 屏幕截图（自动最小化）", command=self._capture_screen,
-                      fg_color="#3a7d44", hover_color="#2d6336").pack(side="left", padx=6)
-        ctk.CTkButton(btns, text="✓ 保存此服务", command=self._save).pack(side="left", padx=6)
-        ctk.CTkButton(btns, text="取消", command=self.destroy,
-                      fg_color="#555", hover_color="#777").pack(side="left", padx=6)
-
-    def _capture_screen(self):
-        self.iconify()
-        self.update_idletasks()
-        time.sleep(0.6)
-        try:
-            bgr, _ = screen.capture_bgr(max_width=1400)
-            self.snap_bgrs.append(bgr)
-        finally:
-            self.deiconify()
-            self.lift()
-        self.hint.set(f"已追加登录页截图，共 {len(self.snap_bgrs)} 张。可继续点坐标或再截多张。")
-
-    def _on_click(self, event):
-        rx = event.x / 700.0
-        ry = event.y / self.canvas.winfo_height()
-        if self.step == "user":
-            self.user_pt = (rx, ry)
-            self.canvas.create_oval(event.x - 6, event.y - 6, event.x + 6, event.y + 6,
-                                    outline="#ff4444", width=3)
-            self.hint.set("已标记用户名框（红点）。第 2 步：点击【密码输入框】位置")
-            self.step = "pwd"
-        elif self.step == "pwd":
-            self.pwd_pt = (rx, ry)
-            self.canvas.create_oval(event.x - 6, event.y - 6, event.x + 6, event.y + 6,
-                                    outline="#4488ff", width=3)
-            self.hint.set("已标记密码框（蓝点）。请填写账号信息后保存。")
-            self.step = "done"
-
-    def _save(self):
-        service = self.vars["service"].get().strip()
-        if not service:
-            messagebox.showwarning("提示", "服务名不能为空", parent=self)
-            return
-        if not self.pwd_pt:
-            messagebox.showwarning("提示", "请先在预览图上点击密码输入框位置", parent=self)
-            return
-        entry = self.vault.add(
-            service=service,
-            url=self.vars["url"].get().strip(),
-            username=self.vars["username"].get().strip(),
-            password=self.vars["password"].get(),
-            note=self.vars["note"].get().strip(),
-            user_coord=self.user_pt,
-            pwd_coord=self.pwd_pt,
-            macro=self.macro_txt.get("1.0", "end").strip(),
-        )
-        files = []
-        for i, bgr in enumerate(self.snap_bgrs):
-            files.append(matcher.save_snapshot(bgr, entry["id"], i))
-        self.vault.update(entry["id"], snapshots=files)
-        self.saved = True
-        self.destroy()
-
-
-class EntryDialog(ctk.CTkToplevel):
-    def __init__(self, master, title="密码条目", entry: dict | None = None):
-        super().__init__(master)
-        self.title(title)
-        self.configure(fg_color=BG)
-        self.entry = entry
-        self.result: dict | None = None
-        self.transient(master)
-        self.grab_set()
-
-        fields = [
-            ("service", "服务名 *"),
-            ("url", "网址"),
-            ("username", "用户名"),
-            ("password", "密码"),
-            ("note", "备注"),
-        ]
-        self.vars = {}
-        for row, (key, label) in enumerate(fields):
-            ctk.CTkLabel(self, text=label, width=90, anchor="w").grid(
-                row=row, column=0, padx=10, pady=6, sticky="w")
-            var = tk.StringVar(value=(entry or {}).get(key, ""))
-            self.vars[key] = var
-            show = "*" if key == "password" else ""
-            ctk.CTkEntry(self, textvariable=var, width=320, show=show).grid(
-                row=row, column=1, padx=10, pady=6)
-        ctk.CTkLabel(self, text="自定义宏", width=90, anchor="nw").grid(
-            row=len(fields), column=0, padx=10, pady=6, sticky="nw")
-        self.macro_txt = ctk.CTkTextbox(self, width=320, height=60)
-        self.macro_txt.insert("1.0", (entry or {}).get("macro", ""))
-        self.macro_txt.grid(row=len(fields), column=1, padx=10, pady=6)
-        btns = ctk.CTkFrame(self, fg_color="transparent")
-        btns.grid(row=len(fields) + 1, column=0, columnspan=2, pady=12)
-        ctk.CTkButton(btns, text="保存", command=self._save).pack(side="left", padx=8)
-        ctk.CTkButton(btns, text="取消", command=self.destroy,
-                      fg_color="#555", hover_color="#777").pack(side="left", padx=8)
-
-    def _save(self):
-        service = self.vars["service"].get().strip()
-        if not service:
-            messagebox.showwarning("提示", "服务名不能为空", parent=self)
-            return
-        self.result = {k: v.get().strip() for k, v in self.vars.items()}
-        self.result["macro"] = self.macro_txt.get("1.0", "end").strip()
-        self.destroy()
-
-
-class App(ctk.CTk):
-    def __init__(self, config, vault, face_engine):
-        super().__init__()
-        self.config = config
-        self.vault = vault
-        self.face_engine = face_engine
-        self.title("人脸识别自动填充密码")
-        self.geometry("820x640")
-        self.configure(fg_color=BG)
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self._busy = False
-        self._setup_tree_style()
-        self._build()
-
-    def _setup_tree_style(self):
-        style = ttk.Style()
-        try:
-            style.theme_use("default")
-        except Exception:
-            pass
-        style.configure("Treeview", background="#2b2b2b", foreground="white",
-                        fieldbackground="#2b2b2b", rowheight=28, borderwidth=0)
-        style.configure("Treeview.Heading", background="#1f1f1f", foreground="white",
-                        relief="flat")
-        style.map("Treeview", background=[("selected", ACCENT)])
-
-    def _build(self):
-        self.tabview = ctk.CTkTabview(self, fg_color=CARD, segmented_button_selected_color=ACCENT)
-        self.tabview.pack(fill="both", expand=True, padx=10, pady=(10, 4))
-        self.tab_vault = self.tabview.add("密码库")
-        self.tab_face = self.tabview.add("人脸")
-        self.tab_settings = self.tabview.add("设置")
-        self._build_vault()
-        self._build_face()
-        self._build_settings()
-
-        log_frame = ctk.CTkFrame(self, fg_color=CARD)
-        log_frame.pack(fill="x", padx=10, pady=(4, 10))
-        ctk.CTkLabel(log_frame, text="运行日志", text_color="#aaa",
-                     font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w", padx=10, pady=(6, 0))
-        self.log_text = ctk.CTkTextbox(log_frame, height=110, fg_color="#202020",
-                                       text_color="#ddd", font=ctk.CTkFont(family="Consolas", size=11))
-        self.log_text.pack(fill="x", padx=10, pady=6)
-
-    def _build_vault(self):
-        f = self.tab_vault
-        top = ctk.CTkFrame(f, fg_color="transparent")
-        top.pack(fill="x", padx=6, pady=6)
-        ctk.CTkLabel(top, text="🔍 搜索", font=ctk.CTkFont(size=13)).pack(side="left", padx=(0, 6))
-        self.search_var = tk.StringVar()
-        self.search_var.trace_add("write", lambda *a: self._refresh_vault())
-        ctk.CTkEntry(top, textvariable=self.search_var, width=200,
-                     placeholder_text="搜索服务名或用户名").pack(side="left", padx=4)
-        for text, cmd, color in (
-                ("＋ 新增", self._add_entry, "#3a7d44"),
-                ("编辑", self._edit_entry, ACCENT),
-                ("删除", self._del_entry, DANGER),
-                ("刷新", self._refresh_vault, "#555")):
-            ctk.CTkButton(top, text=text, width=80, command=cmd,
-                          fg_color=color, hover_color="#777").pack(side="right", padx=3)
-
-        cols = ("service", "username", "url", "snaps", "updated")
-        headers = {"service": "服务名", "username": "用户名", "url": "网址",
-                   "snaps": "截图数", "updated": "更新时间"}
-        self.tree = ttk.Treeview(f, columns=cols, show="headings", height=12)
-        for c in cols:
-            self.tree.heading(c, text=headers[c])
-            width = {"service": 180, "username": 130, "url": 240, "snaps": 80, "updated": 140}[c]
-            self.tree.column(c, width=width, anchor="w")
-        self.tree.pack(fill="both", expand=True, padx=6, pady=4)
-        self._refresh_vault()
-
-    def _build_face(self):
-        f = self.tab_face
-        box = ctk.CTkFrame(f)
-        box.pack(fill="x", padx=10, pady=10)
-        self.face_status = tk.StringVar(value=self._face_status_text())
-        ctk.CTkLabel(box, textvariable=self.face_status, wraplength=560, justify="left",
-                     font=ctk.CTkFont(size=13)).pack(anchor="w", padx=16, pady=(14, 6))
-        btns = ctk.CTkFrame(box, fg_color="transparent")
-        btns.pack(anchor="w", padx=16, pady=(0, 8))
-        ctk.CTkButton(btns, text="📷 开始注册（摄像头采集）", command=self._register_face,
-                      fg_color="#3a7d44", hover_color="#2d6336").pack(side="left", padx=6)
-        ctk.CTkButton(btns, text="清除已注册人脸", command=self._clear_face,
-                      fg_color=DANGER, hover_color="#7a1822").pack(side="left", padx=6)
-        tip = ("注册时请保持正对摄像头、光线充足，程序会自动采集多帧生成模板。\n"
-               "验证时（按 Ctrl+Alt+M 触发填充）会重新采集画面并与模板比对。")
-        ctk.CTkLabel(box, text=tip, text_color="#888", justify="left").pack(
-            anchor="w", padx=16, pady=(0, 14))
-
-    def _build_settings(self):
-        f = self.tab_settings
-        rows = [
-            ("api_key", "视觉模型 API Key（已不使用）", 40, True),
-            ("model", "模型名", 20, False),
-            ("picui_token", "PICUI 图床 Token（可选）", 40, True),
-            ("face_threshold", "人脸相似度阈值 (0~1，越大越严)", 10, False),
-            ("camera_index", "摄像头索引", 6, False),
-        ]
-        self.set_vars = {}
-        for i, (key, label, width, secret) in enumerate(rows):
-            ctk.CTkLabel(f, text=label, anchor="w").grid(row=i, column=0, padx=14, pady=8, sticky="w")
-            var = tk.StringVar(value=str(self.config.get(key, "")))
-            self.set_vars[key] = var
-            ctk.CTkEntry(f, textvariable=var, width=width * 8,
-                          show="*" if secret else "").grid(row=i, column=1, padx=14, pady=8)
-        ctk.CTkLabel(f, text="全局热键：Ctrl+Alt+M（不可改，触发一次自动填充）",
-                     text_color="#888").grid(row=len(rows), column=0, columnspan=2, sticky="w", padx=14, pady=10)
-        ctk.CTkButton(f, text="保存设置", command=self._save_settings,
-                      fg_color="#3a7d44", hover_color="#2d6336").grid(
-            row=len(rows) + 1, column=0, columnspan=2, pady=8)
-        ctk.CTkButton(f, text="测试本地匹配（截当前屏）", command=self._test_vision).grid(
-            row=len(rows) + 2, column=0, columnspan=2, pady=6)
-
-    # ---------------- 密码库 ----------------
-    def _refresh_vault(self):
-        kw = self.search_var.get().strip().lower()
-        self.tree.delete(*self.tree.get_children())
-        for e in self.vault.entries:
-            if kw and kw not in e.get("service", "").lower() \
-                    and kw not in e.get("username", "").lower():
-                continue
-            self.tree.insert("", "end", iid=e["id"], values=(
-                e.get("service", ""), e.get("username", ""), e.get("url", ""),
-                len(e.get("snapshots") or []), e.get("updated", "")))
-
-    def _selected(self):
-        sel = self.tree.selection()
-        if not sel:
-            return None
-        eid = sel[0]
-        return next((e for e in self.vault.entries if e["id"] == eid), None)
-
-    def _add_entry(self):
-        dlg = AddServiceWizard(self, self.vault)
-        self.wait_window(dlg)
-        if dlg.saved:
-            self._refresh_vault()
-            self._log("已新增服务（含登录页截图与坐标）")
-
-    def _edit_entry(self):
-        e = self._selected()
-        if not e:
-            messagebox.showinfo("提示", "请先选中一条记录")
-            return
-        dlg = EntryDialog(self, title="编辑密码条目", entry=e)
-        self.wait_window(dlg)
-        if dlg.result:
-            self.vault.update(e["id"], **dlg.result)
-            self._refresh_vault()
-            self._log(f"已更新条目：{e['service']}")
-
-    def _del_entry(self):
-        e = self._selected()
-        if not e:
-            messagebox.showinfo("提示", "请先选中一条记录")
-            return
-        if messagebox.askyesno("确认", f"删除「{e['service']}」这条记录？"):
-            matcher.delete_snapshots(e.get("snapshots"))
-            self.vault.delete(e["id"])
-            self._refresh_vault()
-            self._log(f"已删除条目：{e['service']}")
-
-    # ---------------- 人脸 ----------------
-    def _face_status_text(self):
-        n = len(self.face_engine.templates)
-        return f"已注册人脸模板：{n} 帧" + ("（完成注册后才允许自动填充）" if n == 0 else "")
-
-    def _register_face(self):
-        if self._busy:
-            return
-        self._busy = True
-        self.face_status.set("正在打开摄像头采集（约 3 秒），请正视摄像头…")
-        threading.Thread(target=self._register_worker, daemon=True).start()
-
-    def _register_worker(self):
-        def done(text):
-            self.face_status.set(text)
-            self._busy = False
-            self._log(text)
-
-        try:
-            cap = cv2.VideoCapture(int(self.config.get("camera_index", 0)))
-            if not cap.isOpened():
-                self.after(0, lambda: done("错误：无法打开摄像头，请检查设备与权限"))
-                return
-            frames = []
-            for _ in range(10):
-                ok, frame = cap.read()
-                if ok:
-                    frames.append(frame)
-                time.sleep(0.15)
-            cap.release()
-            if len(frames) < 3:
-                self.after(0, lambda: done("错误：摄像头采集帧数不足"))
-                return
-            templates, n = self.face_engine.register_from_frames(frames)
-            if n == 0:
-                self.after(0, lambda: done("错误：未能从画面中检测到人脸，请正对摄像头重试"))
-                return
-            self.face_engine.templates = templates
-            self.face_engine.save_templates()
-            self.after(0, lambda: done(f"注册成功：已保存 {n} 帧人脸模板"))
-        except Exception as e:
-            self.after(0, lambda: done(f"注册出错：{e}"))
-
-    def _clear_face(self):
-        self.face_engine.clear_templates()
-        self.face_status.set(self._face_status_text())
-        self._log("已清除人脸模板")
-
-    # ---------------- 设置 ----------------
-    def _save_settings(self):
-        try:
-            thr = float(self.set_vars["face_threshold"].get())
-            if not (0 < thr < 1):
-                raise ValueError
-        except ValueError:
-            messagebox.showwarning("提示", "相似度阈值必须是 0~1 之间的数字")
-            return
-        self.config.set("api_key", self.set_vars["api_key"].get().strip())
-        self.config.set("model", self.set_vars["model"].get().strip())
-        self.config.set("picui_token", self.set_vars["picui_token"].get().strip())
-        self.config.set("face_threshold", thr)
-        self.config.set("camera_index", self.set_vars["camera_index"].get().strip())
-        self.face_engine.set_threshold(thr)
-        self._log("设置已保存（识别已切换为本地截图匹配，不依赖视觉模型）")
-
-    def _test_vision(self):
-        if self._busy:
-            return
-        self._busy = True
-        threading.Thread(target=self._vision_test_worker, daemon=True).start()
-
-    def _vision_test_worker(self):
-        def done(text):
-            self._busy = False
-            self._log(text)
-        try:
-            self._log("正在截取当前屏幕并做本地匹配测试…")
-            bgr, _ = screen.capture_bgr()
-            scored = matcher.match_best(bgr, self.vault.entries)
-            if scored:
-                out = "，".join(f"{e['service']}({s:.2f})" for s, e in scored)
-                self.after(0, lambda: done(f"本地匹配到：{out}"))
-            else:
-                self.after(0, lambda: done("未匹配到任何已保存的登录页（可新增服务）"))
-        except Exception as e:
-            self.after(0, lambda: done(f"匹配测试失败：{e}"))
-
-    # ---------------- 日志 ----------------
-    def _log(self, text):
-        self.log_text.configure(state="normal")
-        self.log_text.insert("end", f"[{time.strftime('%H:%M:%S')}] {text}\n")
-        self.log_text.see("end")
-        self.log_text.configure(state="disabled")
-
-    def _on_close(self):
-        self.destroy()
-
-    # ---------------- 热键触发的填充 ----------------
-    def handle_hotkey(self):
-        if self._busy:
-            self._log("上一个任务尚未结束，忽略本次热键")
-            return
-        self._busy = True
-        self._log("===== 热键触发：开始自动填充 =====")
-        threading.Thread(target=self._autofill_worker, daemon=True).start()
-
-    def _autofill_worker(self):
-        overlay = FaceScanOverlay(self)
-        result = run_autofill(
-            self.config, self.vault, self.face_engine,
-            lambda bgr: matcher.match_best(bgr, self.vault.entries),
-            notify=lambda stage, text: self.after(0, lambda: self._log(f"[{stage}] {text}")),
-            choose=self._choose_candidate,
-            face_verify=True,
-            face_ui=overlay,
-        )
-        self.after(0, self._finish_autofill, result)
-
-    def _finish_autofill(self, result):
-        self._busy = False
-        self._log(f"结果：{result.message}")
-        self.lift()
-        self.attributes("-topmost", True)
-        self.after(200, lambda: self.attributes("-topmost", False))
-        if result.ok:
-            messagebox.showinfo("自动填充", f"✅ {result.message}\n服务：{result.entry.get('service')}")
-        else:
-            messagebox.showwarning("自动填充未完成", result.message)
-
-    def _choose_candidate(self, candidates):
-        q = queue.Queue()
-
-        def _popup():
-            top = ctk.CTkToplevel(self)
-            top.title("选择要填充的条目")
-            top.configure(fg_color=BG)
-            top.transient(self)
-            top.grab_set()
-            box = tk.Listbox(top, width=70, height=min(len(candidates) + 1, 8),
-                             bg="#2b2b2b", fg="white", selectbackground=ACCENT,
-                             relief="flat", font=("Microsoft YaHei", 11))
-            box.pack(padx=16, pady=16)
-            for e in candidates:
-                box.insert("end", f"{e.get('service')}  |  {e.get('username')}  |  {e.get('url')}")
-            box.selection_set(0)
-
-            def _pick():
-                idx = box.curselection()
-                q.put(candidates[idx[0]] if idx else None)
-                top.destroy()
-
-            def _cancel():
-                q.put(None)
-                top.destroy()
-
-            btns = ctk.CTkFrame(top, fg_color="transparent")
-            btns.pack(pady=(0, 14))
-            ctk.CTkButton(btns, text="填充此条", command=_pick).pack(side="left", padx=8)
-            ctk.CTkButton(btns, text="取消", command=_cancel,
-                          fg_color="#555", hover_color="#777").pack(side="left", padx=8)
-            top.protocol("WM_DELETE_WINDOW", _cancel)
-
-        self.after(0, _popup)
-        return q.get(timeout=120)
